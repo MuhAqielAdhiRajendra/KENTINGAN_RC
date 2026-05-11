@@ -2,7 +2,7 @@
 
 Project: Technocorner 2026 Sumobot RC  
 Purpose: quick legality + match-day checklist.  
-Mode: RC only. No autonomous goblin brain.
+Mode: RC only. No autonomous robot brain.
 
 ---
 
@@ -55,7 +55,7 @@ RC must stay RC.
 
 ## 4. Electrical + Mechanical Gate
 
-No smoke. No loose goblin parts.
+No smoke. No loose robot parts.
 
 - [ ] Battery voltage matches motor driver + MCU regulator.
 - [ ] Motor stall current safe for driver.
