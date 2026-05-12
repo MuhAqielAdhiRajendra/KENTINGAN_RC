@@ -201,23 +201,20 @@ void loop() {
     int axisY = myGamepad->axisY();
     uint8_t dpad = myGamepad->dpad();
     
-    if (abs(axisX) < 20) axisX = 0;
-    if (abs(axisY) < 20) axisY = 0;
+    // DEADZONE DINAIKKAN JADI 80 BIAR KEBAL STICK DRIFT
+    if (abs(axisX) < 80) axisX = 0;
+    if (abs(axisY) < 80) axisY = 0;
 
-    bool isJoystickMoved = (axisX != 0 || axisY != 0);
-    bool isDpadPressed = (dpad != 0);
-    bool isABPressed = myGamepad->a() || myGamepad->b(); 
-
-    // 2. TRIGGER MACRO MENGHINDAR
-    if ((myGamepad->r2() > 0 || myGamepad->r1()) && activeMacro != 1) {
-      activeMacro = 1; macroTimer = millis();
-    }
-    else if ((myGamepad->l2() > 0 || myGamepad->l1()) && activeMacro != 2) {
-      activeMacro = 2; macroTimer = millis();
-    }
-
-    if (isJoystickMoved || isABPressed || isDpadPressed) {
-      activeMacro = 0;
+    // 2. TRIGGER MACRO MENGHINDAR (DIPERBAIKI)
+    if (activeMacro == 0) {
+      if (myGamepad->r2() > 50 || myGamepad->r1()) {
+        activeMacro = 1; 
+        macroTimer = millis();
+      }
+      else if (myGamepad->l2() > 50 || myGamepad->l1()) {
+        activeMacro = 2; 
+        macroTimer = millis();
+      }
     }
 
     // 3. EKSEKUSI PERGERAKAN
@@ -234,6 +231,7 @@ void loop() {
       } else { activeMacro = 0; }
     }
     else {
+      // KONTROL MANUAL
       if (dpad & DPAD_UP) { leftMotorSpeed = 512; rightMotorSpeed = -512; } 
       else if (dpad & DPAD_DOWN) { leftMotorSpeed = -512; rightMotorSpeed = 512; } 
       else if (dpad & DPAD_RIGHT) { leftMotorSpeed = 512; rightMotorSpeed = 512; } 
