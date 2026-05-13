@@ -3,13 +3,12 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-
 // ==========================================
 // DEFINISI PIN MOTOR, LED, & BATERAI
 // ==========================================
 const int LEFT_IN1 = 16;
 const int LEFT_IN2 = 17;
-const int RIGHT_IN3 = 5;
+const int RIGHT_IN3 = 19;
 const int RIGHT_IN4 = 18;
 const int LED_BUILTIN_PIN = 2;
 const int BATTERY_PIN = 32; 
