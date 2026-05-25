@@ -1,236 +1,244 @@
-#include <Bluepad32.h>
+#include <esp_now.h>
+#include <WiFi.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
 // ==========================================
-// DEFINISI PIN MOTOR, LED, & BATERAI
+// DEFINISI PIN & KONFIGURASI LAYAR
 // ==========================================
 const int LEFT_IN1 = 16;
 const int LEFT_IN2 = 17;
 const int RIGHT_IN3 = 19;
 const int RIGHT_IN4 = 18;
 const int LED_BUILTIN_PIN = 2;
-const int BATTERY_PIN = 32; 
+const int BATTERY_PIN = 32;
+const int BUZZER_PIN = 26; 
 
-// ==========================================
-// PENGATURAN KALIBRASI VOLTASE
-// ==========================================
-// SUDAH DIKALIBRASI (Berdasarkan tes: Asli 11.6V, Layar 11.0V)
-const float voltMultiplier = 5.27; 
-
-// ==========================================
-// DEFINISI LAYAR OLED (I2C)
-// ==========================================
+const float voltMultiplier = 5.27;
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// ==========================================
-// SETTING WAKTU
-// ==========================================
-const unsigned long WAKTU_MUNDUR = 800;  
-const unsigned long WAKTU_BATERAI = 180000; // 3 Menit
+const unsigned long WAKTU_MUNDUR = 800;
+const unsigned long WAKTU_BATERAI = 180000; 
+
+#define DPAD_UP    0x01
+#define DPAD_DOWN  0x02
+#define DPAD_RIGHT 0x04
+#define DPAD_LEFT  0x08
+
+typedef struct struct_message {
+  int axisX;
+  int axisY;     
+  uint8_t dpad;  
+  bool a;
+  bool b;
+  bool r1;
+  bool l1;
+  int r2;        
+  int l2;        
+  bool thumbR;   
+  bool misc;
+} struct_message;
+
+struct_message myGamepad;
 
 // Variabel Global
-GamepadPtr myGamepad = nullptr;
+volatile unsigned long lastRecvTime = 0;
+volatile bool isConnected = false;
+volatile bool modeBrutal = true;
+volatile int currentRPM = 0; 
+volatile float currentVoltage = 0.0;
+
 unsigned long macroTimer = 0;
 int activeMacro = 0; 
-bool modeBrutal = true;
-bool lastR3State = false;   
+bool lastR3State = false;
+int leftMotorSpeed = 0;
+int rightMotorSpeed = 0;
+TaskHandle_t TaskOLED;
 
-unsigned long lastDisplayUpdate = 0;
-unsigned long lastBatteryUpdate = 0; 
-bool blinkDot = false;
-int currentRPM = 0; 
-float currentVoltage = 0.0; 
-
-unsigned long totalActiveTimeMicros = 0;
-int cpuUsage = 0;
+// ==========================================
+// CALLBACK ESP-NOW (Penerima Data Cepat)
+// ==========================================
+// UBAH FUNGSI OnDataRecv JADI SEPERTI INI:
+void OnDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData, int len) {
+  if (len == sizeof(struct_message)) {
+    memcpy(&myGamepad, incomingData, sizeof(myGamepad));
+    lastRecvTime = millis();
+    isConnected = true;
+  }
+}
 
 void stopMotor() {
-  analogWrite(LEFT_IN1, 0);
-  analogWrite(LEFT_IN2, 0);
-  analogWrite(RIGHT_IN3, 0);
-  analogWrite(RIGHT_IN4, 0);
+  digitalWrite(LEFT_IN1, LOW);
+  digitalWrite(LEFT_IN2, LOW);
+  digitalWrite(RIGHT_IN3, LOW);
+  digitalWrite(RIGHT_IN4, LOW);
   currentRPM = 0;
 }
 
-void onConnectedGamepad(GamepadPtr gp) {
-  if (myGamepad == nullptr) {
-    myGamepad = gp;
-    BP32.enableNewBluetoothConnections(false);
+// ==========================================
+// CORE 0: LAYAR OLED & BATERAI
+// ==========================================
+void LayarDanBateraiTask(void * pvParameters) {
+  unsigned long lastDisplayUpdate = 0;
+  unsigned long lastBatteryUpdate = 0;
+  bool blinkDot = false;
+
+  for(;;) {
+    if (millis() - lastBatteryUpdate >= WAKTU_BATERAI) {
+      lastBatteryUpdate = millis();
+      long totalADC = 0;
+      for (int i = 0; i < 20; i++) totalADC += analogRead(BATTERY_PIN);
+      currentVoltage = ((totalADC / 20) * 3.3 / 4095.0) * voltMultiplier;
+    }
+
+    if (millis() - lastDisplayUpdate >= 250) {
+      lastDisplayUpdate = millis();
+      blinkDot = !blinkDot; 
+
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(0, 0);
+      
+      if (isConnected) display.print("Konek ESP-NOW");
+      else { display.print("Mencari Sinyal"); if(blinkDot) display.print("."); }
+
+      display.setCursor(75, 0);
+      display.print("V:"); display.print(currentVoltage, 1); display.print("V");
+      display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
+      
+      display.setCursor(0, 15);
+      display.print("Mode: "); display.print(modeBrutal ? "BRUTAL (100%)" : "KALEM (50%)");
+      
+      display.setTextSize(2);
+      display.setCursor(0, 30);
+      display.print("RPM: "); display.print(currentRPM);
+      display.setTextSize(1); display.print("%");
+
+      display.display();
+    }
+    vTaskDelay(10 / portTICK_PERIOD_MS);
   }
-}
-
-void onDisconnectedGamepad(GamepadPtr gp) {
-  if (myGamepad == gp) {
-    myGamepad = nullptr;
-    stopMotor(); 
-    BP32.enableNewBluetoothConnections(true);
-  }
-}
-
-void updateBattery() {
-  long totalADC = 0;
-  for (int i = 0; i < 20; i++) {
-    totalADC += analogRead(BATTERY_PIN);
-  }
-  int avgADC = totalADC / 20;
-  
-  // Rumus Konversi ADC ke Voltase dengan Multiplier Baru
-  float vPin = (avgADC * 3.3) / 4095.0;
-  currentVoltage = vPin * voltMultiplier;
-}
-
-void updateOLED() {
-  display.clearDisplay();
-  
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  if (myGamepad && myGamepad->isConnected()) {
-    display.print("Konek ");
-  } else {
-    display.print("Nyari ");
-  }
-  if (blinkDot) display.print(".");
-
-  // TAMPILAN VOLTASE
-  display.setCursor(75, 0);
-  display.print("V:");
-  display.print(currentVoltage, 1); 
-  display.print("V");
-
-  display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
-  
-  display.setCursor(0, 15);
-  display.print("Mode: ");
-  display.print(modeBrutal ? "BRUTAL (100%)" : "KALEM (50%)");
-
-  display.setTextSize(2);
-  display.setCursor(0, 30);
-  display.print("RPM: ");
-  display.print(currentRPM);
-  display.setTextSize(1);
-  display.print("%");
-
-  display.setTextSize(1);
-  display.setCursor(0, 52);
-  display.print("CPU Usage: ");
-  display.print(cpuUsage);
-  display.print("%");
-
-  display.display();
 }
 
 void setup() {
   Serial.begin(115200);
+
   pinMode(LEFT_IN1, OUTPUT);
   pinMode(LEFT_IN2, OUTPUT);
   pinMode(RIGHT_IN3, OUTPUT);
   pinMode(RIGHT_IN4, OUTPUT);
   pinMode(LED_BUILTIN_PIN, OUTPUT);
-  pinMode(BATTERY_PIN, INPUT); 
+  pinMode(BATTERY_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT); 
   
   digitalWrite(LED_BUILTIN_PIN, HIGH); 
-  stopMotor();
+  stopMotor(); 
 
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println(F("OLED Gagal Terhubung!"));
-  } else {
-    display.clearDisplay();
-    display.setTextSize(2);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(10, 20);
-    display.print("BOOTING..");
-    display.display();
-    delay(1000);
+  if(display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    display.clearDisplay(); display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE); display.setCursor(0, 0);
+    display.print("ROBOT STARTING..."); display.display();
+    tone(BUZZER_PIN, 1000, 150); delay(200);
+    tone(BUZZER_PIN, 2000, 300); delay(1000); 
+    noTone(BUZZER_PIN);
   }
 
-  BP32.setup(&onConnectedGamepad, &onDisconnectedGamepad);
-  updateBattery();
+  // ==========================================
+  // INISIALISASI ESP-NOW
+  // ==========================================
+  WiFi.mode(WIFI_STA);
+  Serial.println("================================");
+  Serial.print("MAC Address Robot: ");
+  Serial.println(WiFi.macAddress()); // CATAT INI UNTUK STIK!
+  Serial.println("================================");
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+  esp_now_register_recv_cb(OnDataRecv);
+
+  // Jalankan OLED di Core 0
+  xTaskCreatePinnedToCore(LayarDanBateraiTask, "TaskOLED", 10000, NULL, 1, &TaskOLED, 0);
 }
 
+// ==========================================
+// CORE 1: GERAK MOTOR (PRIORITAS UTAMA)
+// ==========================================
 void loop() {
-  unsigned long loopStart = micros();
-  BP32.update();
-  int leftMotorSpeed = 0;
-  int rightMotorSpeed = 0;
+  // Failsafe: Putus koneksi otomatis jika 1 detik sinyal mati
+  if (millis() - lastRecvTime > 1000) {
+    stopMotor(); 
+    isConnected = false;
+    myGamepad.axisX = 0;
+    myGamepad.axisY = 0;
+    myGamepad.dpad = 0;
+    activeMacro = 0;
+  }
 
-  if (myGamepad && myGamepad->isConnected()) {
-    if (myGamepad->miscButtons() & 0x02) {
+  if (isConnected) {
+    if (myGamepad.misc) {
       activeMacro = 0;
       macroTimer = 0; 
       stopMotor(); 
-      display.clearDisplay();
-      display.setTextSize(2);
-      display.setTextColor(SSD1306_WHITE);
-      display.setCursor(35, 25);
-      display.print("RESET");
-      display.display();
-      delay(1000); 
-      return;
+      tone(BUZZER_PIN, 800, 200); 
+      myGamepad.misc = false;
     }
 
-    bool currentR3 = myGamepad->thumbR();
+    bool currentR3 = myGamepad.thumbR;
     if (currentR3 && !lastR3State) {
       modeBrutal = !modeBrutal;
       digitalWrite(LED_BUILTIN_PIN, modeBrutal ? HIGH : LOW);
+      if(modeBrutal) tone(BUZZER_PIN, 1800, 100); 
+      else tone(BUZZER_PIN, 600, 100);  
     }
     lastR3State = currentR3; 
 
-    int axisX = myGamepad->axisX();
-    int axisY = myGamepad->axisY();
-    uint8_t dpad = myGamepad->dpad();
+    int axisX = myGamepad.axisX;
+    int axisY = myGamepad.axisY;
+    uint8_t dpad = myGamepad.dpad;
     
     if (abs(axisX) < 80) axisX = 0;
     if (abs(axisY) < 80) axisY = 0;
 
     if (activeMacro == 0) {
-      if (myGamepad->r2() > 50 || myGamepad->r1()) {
-        activeMacro = 1; macroTimer = millis();
-      }
-      else if (myGamepad->l2() > 50 || myGamepad->l1()) {
-        activeMacro = 2; macroTimer = millis();
-      }
+      if (myGamepad.r2 > 50 || myGamepad.r1) { activeMacro = 1; macroTimer = millis(); }
+      else if (myGamepad.l2 > 50 || myGamepad.l1) { activeMacro = 2; macroTimer = millis(); }
     }
 
     if (activeMacro == 1) {
-      unsigned long elapsed = millis() - macroTimer;
-      if (elapsed < WAKTU_MUNDUR) {
-        leftMotorSpeed = -512; rightMotorSpeed = 200;
-      } else { activeMacro = 0; }
+      if (millis() - macroTimer < WAKTU_MUNDUR) { leftMotorSpeed = -512; rightMotorSpeed = 200; } 
+      else activeMacro = 0;
     } 
     else if (activeMacro == 2) {
-      unsigned long elapsed = millis() - macroTimer;
-      if (elapsed < WAKTU_MUNDUR) {
-        leftMotorSpeed = -200; rightMotorSpeed = 512;
-      } else { activeMacro = 0; }
+      if (millis() - macroTimer < WAKTU_MUNDUR) { leftMotorSpeed = -200; rightMotorSpeed = 512; } 
+      else activeMacro = 0;
     }
     else {
       if (dpad & DPAD_UP) { leftMotorSpeed = 512; rightMotorSpeed = -512; } 
       else if (dpad & DPAD_DOWN) { leftMotorSpeed = -512; rightMotorSpeed = 512; } 
       else if (dpad & DPAD_RIGHT) { leftMotorSpeed = 512; rightMotorSpeed = 512; } 
       else if (dpad & DPAD_LEFT) { leftMotorSpeed = -512; rightMotorSpeed = -512; }
-      else if (myGamepad->a()) { leftMotorSpeed = 512; rightMotorSpeed = -512; } 
-      else if (myGamepad->b()) { leftMotorSpeed = -512; rightMotorSpeed = 512; } 
+      else if (myGamepad.a) { leftMotorSpeed = 512; rightMotorSpeed = -512; } 
+      else if (myGamepad.b) { leftMotorSpeed = -512; rightMotorSpeed = 512; } 
       else {
-        int throttle = -axisY;
-        int steering = axisX;  
-        leftMotorSpeed = throttle + steering;
-        rightMotorSpeed = -throttle + steering;
+        leftMotorSpeed = -axisY + axisX;
+        rightMotorSpeed = axisY + axisX; 
       }
     }
 
     if (!modeBrutal && activeMacro == 0) {
-      leftMotorSpeed = leftMotorSpeed / 2;
-      rightMotorSpeed = rightMotorSpeed / 2;
+      leftMotorSpeed /= 2; rightMotorSpeed /= 2;
     }
 
     leftMotorSpeed = constrain(leftMotorSpeed, -512, 512);
     rightMotorSpeed = constrain(rightMotorSpeed, -512, 512);
+    
     int pwmLeft = map(abs(leftMotorSpeed), 0, 512, 0, 255);
     int pwmRight = map(abs(rightMotorSpeed), 0, 512, 0, 255);
 
@@ -241,29 +249,7 @@ void loop() {
     if (rightMotorSpeed > 0) { analogWrite(RIGHT_IN3, pwmRight); analogWrite(RIGHT_IN4, 0); } 
     else if (rightMotorSpeed < 0) { analogWrite(RIGHT_IN3, 0); analogWrite(RIGHT_IN4, pwmRight); } 
     else { analogWrite(RIGHT_IN3, 0); analogWrite(RIGHT_IN4, 0); }
-
-  } else {
-    stopMotor();
-  }
-  
-  if (millis() - lastBatteryUpdate >= WAKTU_BATERAI) {
-    lastBatteryUpdate = millis();
-    updateBattery();
-  }
-
-  if (millis() - lastDisplayUpdate >= 250) {
-    lastDisplayUpdate = millis();
-    blinkDot = !blinkDot; 
-    int avgSpeed = (abs(leftMotorSpeed) + abs(rightMotorSpeed)) / 2;
-    currentRPM = map(avgSpeed, 0, 512, 0, 100);
-    cpuUsage = (totalActiveTimeMicros * 100) / 250000;
-    if (cpuUsage == 0 && totalActiveTimeMicros > 100) cpuUsage = 1; 
-    if (cpuUsage > 100) cpuUsage = 100;
-    updateOLED();
-    totalActiveTimeMicros = 0;
-  }
-
-  unsigned long activeTime = micros() - loopStart;
-  totalActiveTimeMicros += activeTime;
-  delay(15); 
+    
+    currentRPM = map((abs(leftMotorSpeed) + abs(rightMotorSpeed)) / 2, 0, 512, 0, 100);
+  } 
 }
