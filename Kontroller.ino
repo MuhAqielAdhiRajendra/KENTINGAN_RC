@@ -12,9 +12,8 @@ PS2X ps2x;
 int error = -1;
 
 // ==========================================
-// TARGET MAC ROBOT SUMO LU (WAJIB SESUAI)
+// TARGET MAC ROBOT SUMO (WAJIB SESUAI)
 // ==========================================
-// Ganti angka di bawah sesuai yang muncul di Serial Monitor Robot
 uint8_t robotAddress[] = {0xB0, 0xCB, 0xD8, 0xE3, 0x00, 0xF4}; 
 
 #define DPAD_UP    0x01
@@ -42,11 +41,14 @@ unsigned long lastSendTime = 0;
 
 void setup() {
   Serial.begin(115200);
+  delay(1000); // Beri waktu Serial Monitor siap
   
+  Serial.println("--- Memulai Controller Stik Sumo ---");
+
   // Inisialisasi ESP-NOW
   WiFi.mode(WIFI_STA);
   if (esp_now_init() != ESP_OK) {
-    Serial.println("Error initializing ESP-NOW");
+    Serial.println("Gagal Inisialisasi ESP-NOW");
     return;
   }
 
@@ -55,12 +57,20 @@ void setup() {
   peerInfo.channel = 0;  
   peerInfo.encrypt = false;
   if (esp_now_add_peer(&peerInfo) != ESP_OK){
-    Serial.println("Failed to add peer");
+    Serial.println("Gagal Menambahkan Robot sebagai Peer");
     return;
   }
 
   // Setup Stik PS2
+  Serial.println("Mengonfigurasi Stik PS2...");
   error = ps2x.config_gamepad(PS2_CLK, PS2_CMD, PS2_SEL, PS2_DAT, false, false);
+  
+  if(error == 0) {
+    Serial.println("Stik PS2 Terhubung dan Sukses Dikonfigurasi!");
+  } else {
+    Serial.print("Eror Stik PS2 Terdeteksi, Kode Eror: ");
+    Serial.println(error);
+  }
 }
 
 void loop() {
@@ -73,23 +83,19 @@ void loop() {
 
   ps2x.read_gamepad(false, 0); 
 
-  // Mapping Analog
-  myGamepad.axisX = map(ps2x.Analog(PSS_LX), 0, 255, -512, 512);
-  myGamepad.axisY = map(ps2x.Analog(PSS_LY), 0, 255, -512, 512);
-
-  // Deadzone untuk stik kendor
-  if (abs(myGamepad.axisX) < 80) myGamepad.axisX = 0;
-  if (abs(myGamepad.axisY) < 80) myGamepad.axisY = 0;
+  // --- JOYSTICK DINONAKTIFKAN ---
+  myGamepad.axisX = 0;
+  myGamepad.axisY = 0;
 
   // Mapping D-Pad
   uint8_t dpadState = 0;
-  if(ps2x.Button(PSB_PAD_UP)) dpadState |= DPAD_UP;
-  if(ps2x.Button(PSB_PAD_DOWN)) dpadState |= DPAD_DOWN;
+  if(ps2x.Button(PSB_PAD_UP))    dpadState |= DPAD_UP;
+  if(ps2x.Button(PSB_PAD_DOWN))  dpadState |= DPAD_DOWN;
   if(ps2x.Button(PSB_PAD_RIGHT)) dpadState |= DPAD_RIGHT;
-  if(ps2x.Button(PSB_PAD_LEFT)) dpadState |= DPAD_LEFT;
+  if(ps2x.Button(PSB_PAD_LEFT))  dpadState |= DPAD_LEFT;
   myGamepad.dpad = dpadState;
 
-  // Mapping Tombol
+  // Mapping Tombol Aksi & Macro
   myGamepad.a = ps2x.Button(PSB_CROSS);
   myGamepad.b = ps2x.Button(PSB_CIRCLE);
   myGamepad.r1 = ps2x.Button(PSB_R1);
@@ -99,10 +105,7 @@ void loop() {
   myGamepad.thumbR = ps2x.Button(PSB_R3);
   myGamepad.misc = ps2x.Button(PSB_SELECT);
 
-  // ==========================================
-  // PENGIRIMAN DATA ANTI DELAY
-  // ==========================================
-  // Kirim data setiap 20 milidetik aja biar buffer ESP32 nggak meledak
+  // Pengiriman data anti delay (interval 20ms)
   if (millis() - lastSendTime >= 20) {
     esp_now_send(robotAddress, (uint8_t *) &myGamepad, sizeof(myGamepad));
     lastSendTime = millis();
