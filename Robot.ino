@@ -60,9 +60,8 @@ int rightMotorSpeed = 0;
 TaskHandle_t TaskOLED;
 
 // ==========================================
-// CALLBACK ESP-NOW (Penerima Data Cepat)
+// CALLBACK ESP-NOW
 // ==========================================
-// UBAH FUNGSI OnDataRecv JADI SEPERTI INI:
 void OnDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData, int len) {
   if (len == sizeof(struct_message)) {
     memcpy(&myGamepad, incomingData, sizeof(myGamepad));
@@ -148,35 +147,23 @@ void setup() {
     noTone(BUZZER_PIN);
   }
 
-  // ==========================================
-  // INISIALISASI ESP-NOW
-  // ==========================================
   WiFi.mode(WIFI_STA);
-  Serial.println("================================");
-  Serial.print("MAC Address Robot: ");
-  Serial.println(WiFi.macAddress()); // CATAT INI UNTUK STIK!
-  Serial.println("================================");
-
   if (esp_now_init() != ESP_OK) {
     Serial.println("Error initializing ESP-NOW");
     return;
   }
   esp_now_register_recv_cb(OnDataRecv);
 
-  // Jalankan OLED di Core 0
   xTaskCreatePinnedToCore(LayarDanBateraiTask, "TaskOLED", 10000, NULL, 1, &TaskOLED, 0);
 }
 
 // ==========================================
-// CORE 1: GERAK MOTOR (PRIORITAS UTAMA)
+// CORE 1: GERAK MOTOR (PRIORITAS UTAMA) - UPDATE FINAL LOGIKA DPAD
 // ==========================================
 void loop() {
-  // Failsafe: Putus koneksi otomatis jika 1 detik sinyal mati
   if (millis() - lastRecvTime > 1000) {
     stopMotor(); 
     isConnected = false;
-    myGamepad.axisX = 0;
-    myGamepad.axisY = 0;
     myGamepad.dpad = 0;
     activeMacro = 0;
   }
@@ -199,12 +186,11 @@ void loop() {
     }
     lastR3State = currentR3; 
 
-    int axisX = myGamepad.axisX;
-    int axisY = myGamepad.axisY;
     uint8_t dpad = myGamepad.dpad;
     
-    if (abs(axisX) < 80) axisX = 0;
-    if (abs(axisY) < 80) axisY = 0;
+    // Reset kecepatan ke 0
+    leftMotorSpeed = 0; 
+    rightMotorSpeed = 0;
 
     if (activeMacro == 0) {
       if (myGamepad.r2 > 50 || myGamepad.r1) { activeMacro = 1; macroTimer = millis(); }
@@ -220,16 +206,31 @@ void loop() {
       else activeMacro = 0;
     }
     else {
-      if (dpad & DPAD_UP) { leftMotorSpeed = 512; rightMotorSpeed = -512; } 
-      else if (dpad & DPAD_DOWN) { leftMotorSpeed = -512; rightMotorSpeed = 512; } 
-      else if (dpad & DPAD_RIGHT) { leftMotorSpeed = 512; rightMotorSpeed = 512; } 
-      else if (dpad & DPAD_LEFT) { leftMotorSpeed = -512; rightMotorSpeed = -512; }
-      else if (myGamepad.a) { leftMotorSpeed = 512; rightMotorSpeed = -512; } 
-      else if (myGamepad.b) { leftMotorSpeed = -512; rightMotorSpeed = 512; } 
-      else {
-        leftMotorSpeed = -axisY + axisX;
-        rightMotorSpeed = axisY + axisX; 
+      // =======================================================
+      // KONTROL D-PAD (FIXED 100% MAJU, MUNDUR, KIRI, KANAN)
+      // =======================================================
+      if (dpad & DPAD_UP) { 
+        // PANAH ATAS -> MAJU
+        leftMotorSpeed = -512; 
+        rightMotorSpeed = -512; 
+      } 
+      else if (dpad & DPAD_DOWN) { 
+        // PANAH BAWAH -> MUNDUR
+        leftMotorSpeed = 512; 
+        rightMotorSpeed = 512; 
+      } 
+      else if (dpad & DPAD_RIGHT) { 
+        // PANAH KANAN -> BELOK KANAN (Ban kiri mundur, ban kanan maju)
+        leftMotorSpeed = 512; 
+        rightMotorSpeed = -512; 
+      } 
+      else if (dpad & DPAD_LEFT) { 
+        // PANAH KIRI -> BELOK KIRI (Ban kiri maju, ban kanan mundur)
+        leftMotorSpeed = -512; 
+        rightMotorSpeed = 512; 
       }
+      else if (myGamepad.a) { leftMotorSpeed = -512; rightMotorSpeed = 512; } 
+      else if (myGamepad.b) { leftMotorSpeed = 512; rightMotorSpeed = -512; } 
     }
 
     if (!modeBrutal && activeMacro == 0) {
@@ -242,13 +243,15 @@ void loop() {
     int pwmLeft = map(abs(leftMotorSpeed), 0, 512, 0, 255);
     int pwmRight = map(abs(rightMotorSpeed), 0, 512, 0, 255);
 
+    // Eksekusi Roda Kiri
     if (leftMotorSpeed > 0) { analogWrite(LEFT_IN1, pwmLeft); analogWrite(LEFT_IN2, 0); } 
     else if (leftMotorSpeed < 0) { analogWrite(LEFT_IN1, 0); analogWrite(LEFT_IN2, pwmLeft); } 
     else { analogWrite(LEFT_IN1, 0); analogWrite(LEFT_IN2, 0); }
 
+    // Eksekusi Roda Kanan
     if (rightMotorSpeed > 0) { analogWrite(RIGHT_IN3, pwmRight); analogWrite(RIGHT_IN4, 0); } 
     else if (rightMotorSpeed < 0) { analogWrite(RIGHT_IN3, 0); analogWrite(RIGHT_IN4, pwmRight); } 
-    else { analogWrite(RIGHT_IN3, 0); analogWrite(RIGHT_IN4, 0); }
+    else { analogWrite(RIGHT_IN3, 0); rightMotorSpeed = 0; analogWrite(RIGHT_IN4, 0); }
     
     currentRPM = map((abs(leftMotorSpeed) + abs(rightMotorSpeed)) / 2, 0, 512, 0, 100);
   } 
