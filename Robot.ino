@@ -1,13 +1,15 @@
 #include <esp_now.h>
 #include <WiFi.h>
+#include <esp_wifi.h> 
 
 // ==========================================
 // DEFINISI PIN & KONFIGURASI
 // ==========================================
-const int LEFT_IN1 = 16;
-const int LEFT_IN2 = 17;
-const int RIGHT_IN3 = 19;
-const int RIGHT_IN4 = 18;
+const int LEFT_IN1 = 26;   
+const int LEFT_IN2 = 25;  
+const int RIGHT_IN3 = 32; 
+const int RIGHT_IN4 = 33; 
+
 const int LED_BUILTIN_PIN = 2;
 const int BUZZER_PIN = 26; 
 
@@ -16,8 +18,8 @@ const unsigned long WAKTU_MUNDUR = 800;
 // ==========================================
 // KALIBRASI SINKRONISASI MUNDUR
 // ==========================================
-float offsetMundurKiri = 1.0;  // Ubah jika roda kiri terlalu cepat saat mundur (misal 0.90)
-float offsetMundurKanan = 1.0; // Ubah jika roda kanan terlalu cepat saat mundur (misal 0.90)
+float offsetMundurKiri = 1.0;  
+float offsetMundurKanan = 1.0; 
 
 #define DPAD_UP    0x01
 #define DPAD_DOWN  0x02
@@ -52,25 +54,51 @@ int leftMotorSpeed = 0;
 int rightMotorSpeed = 0;
 
 // ==========================================
-// CALLBACK ESP-NOW
+// CALLBACK ESP-NOW (Telah disesuaikan untuk Core v3.x)
 // ==========================================
-void OnDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData, int len) {
+void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingData, int len) {
+  // Cek apakah ukuran datanya sama persis
   if (len == sizeof(struct_message)) {
     memcpy(&myGamepad, incomingData, sizeof(myGamepad));
     lastRecvTime = millis();
     isConnected = true;
+    
+    // --- DEBUGGING: Cetak tombol yang ditekan ---
+    if (myGamepad.dpad != 0) {
+      Serial.print("D-Pad Ditekan! Nilai: ");
+      Serial.println(myGamepad.dpad);
+    }
+  } else {
+    // --- DEBUGGING: Tampilkan eror jika ukuran struct beda ---
+    Serial.print("❌ Eror! Ukuran data beda. Diterima: ");
+    Serial.print(len);
+    Serial.print(" bytes, Diharapkan: ");
+    Serial.print(sizeof(struct_message));
+    Serial.println(" bytes.");
   }
 }
 
 void stopMotor() {
-  digitalWrite(LEFT_IN1, LOW);
-  digitalWrite(LEFT_IN2, LOW);
-  digitalWrite(RIGHT_IN3, LOW);
-  digitalWrite(RIGHT_IN4, LOW);
+  // Wajib pakai murni analogWrite agar ESP32 tidak nge-glitch
+  analogWrite(LEFT_IN1, 255);
+  analogWrite(LEFT_IN2, 255);
+  analogWrite(RIGHT_IN3, 255);
+  analogWrite(RIGHT_IN4, 255);
 }
 
 void setup() {
   Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n--- Sistem Robot Sumo Menyala ---");
+
+  WiFi.mode(WIFI_STA);
+
+  // Manipulasi MAC Address agar sinkron dengan Remote
+  uint8_t macBaru[] = {0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F}; 
+  esp_wifi_set_mac(WIFI_IF_STA, &macBaru[0]);
+
+  Serial.print("MAC Address Robot (Spoofed): ");
+  Serial.println(WiFi.macAddress());
 
   pinMode(LEFT_IN1, OUTPUT);
   pinMode(LEFT_IN2, OUTPUT);
@@ -82,24 +110,24 @@ void setup() {
   digitalWrite(LED_BUILTIN_PIN, HIGH); 
   stopMotor(); 
 
-  // Notifikasi Suara Robot Nyala
   tone(BUZZER_PIN, 1000, 150); delay(200);
   tone(BUZZER_PIN, 2000, 300); delay(1000); 
   noTone(BUZZER_PIN);
 
-  WiFi.mode(WIFI_STA);
   if (esp_now_init() != ESP_OK) {
     Serial.println("Error initializing ESP-NOW");
     return;
   }
   esp_now_register_recv_cb(OnDataRecv);
+  Serial.println("ESP-NOW Siap. Menunggu perintah dari Remote...");
 }
 
-// ==========================================
-// MAIN LOOP: GERAK MOTOR 
-// ==========================================
 void loop() {
+  // Jika 1 detik tidak ada data masuk, stop motor (Failsafe)
   if (millis() - lastRecvTime > 1000) {
+    if (isConnected) {
+      Serial.println("⚠️ Sinyal Terputus! Menghentikan motor.");
+    }
     stopMotor(); 
     isConnected = false;
     myGamepad.dpad = 0;
@@ -113,6 +141,7 @@ void loop() {
       stopMotor(); 
       tone(BUZZER_PIN, 800, 200); 
       myGamepad.misc = false;
+      Serial.println("Tombol Misc Ditekan -> Stop All");
     }
 
     bool currentR3 = myGamepad.thumbR;
@@ -121,6 +150,8 @@ void loop() {
       digitalWrite(LED_BUILTIN_PIN, modeBrutal ? HIGH : LOW);
       if(modeBrutal) tone(BUZZER_PIN, 1800, 100); 
       else tone(BUZZER_PIN, 600, 100);  
+      Serial.print("Ganti Mode: ");
+      Serial.println(modeBrutal ? "BRUTAL" : "SANTAI");
     }
     lastR3State = currentR3; 
 
@@ -130,8 +161,8 @@ void loop() {
     rightMotorSpeed = 0;
 
     if (activeMacro == 0) {
-      if (myGamepad.r2 > 50 || myGamepad.r1) { activeMacro = 1; macroTimer = millis(); }
-      else if (myGamepad.l2 > 50 || myGamepad.l1) { activeMacro = 2; macroTimer = millis(); }
+      if (myGamepad.r2 > 50 || myGamepad.r1) { activeMacro = 1; macroTimer = millis(); Serial.println("Macro 1 Aktif!"); }
+      else if (myGamepad.l2 > 50 || myGamepad.l1) { activeMacro = 2; macroTimer = millis(); Serial.println("Macro 2 Aktif!"); }
     }
 
     if (activeMacro == 1) {
@@ -144,7 +175,8 @@ void loop() {
     }
     else {
       // =======================================================
-      // KONTROL D-PAD
+      // KONTROL D-PAD (ARAH PIVOT SUDAH DIBENARKAN)
+      // (-) Minus = Maju | (+) Plus = Mundur
       // =======================================================
       if (dpad & DPAD_UP) { 
         // MAJU
@@ -157,19 +189,17 @@ void loop() {
         rightMotorSpeed = 512; 
       } 
       else if (dpad & DPAD_RIGHT) { 
-        // PIVOT KANAN (Sudah ditukar sesuai wiring)
-        // Kedua ban aktif berlawanan arah agar belok cepat
-        leftMotorSpeed = 512;  
-        rightMotorSpeed = -512; 
+        // PIVOT KANAN: Kiri Maju (-), Kanan Mundur (+)
+        leftMotorSpeed = -512;  
+        rightMotorSpeed = 512; 
       } 
       else if (dpad & DPAD_LEFT) { 
-        // PIVOT KIRI (Sudah ditukar sesuai wiring)
-        // Kedua ban aktif berlawanan arah agar belok cepat
-        leftMotorSpeed = -512; 
-        rightMotorSpeed = 512; 
+        // PIVOT KIRI: Kiri Mundur (+), Kanan Maju (-)
+        leftMotorSpeed = 512; 
+        rightMotorSpeed = -512; 
       }
-      else if (myGamepad.a) { leftMotorSpeed = 512; rightMotorSpeed = -512; } // Tombol A disamakan dengan kanan
-      else if (myGamepad.b) { leftMotorSpeed = -512; rightMotorSpeed = 512; } // Tombol B disamakan dengan kiri
+      else if (myGamepad.a) { leftMotorSpeed = 512; rightMotorSpeed = -512; } 
+      else if (myGamepad.b) { leftMotorSpeed = -512; rightMotorSpeed = 512; } 
     }
 
     if (!modeBrutal && activeMacro == 0) {
@@ -182,15 +212,15 @@ void loop() {
     int pwmLeft = map(abs(leftMotorSpeed), 0, 512, 0, 255);
     int pwmRight = map(abs(rightMotorSpeed), 0, 512, 0, 255);
 
-    // =======================================================
-    // FIX: KALIBRASI HANYA AKTIF SAAT MUNDUR LURUS
-    // Biar gak mengganggu kecepatan putaran saat pivot turn
-    // =======================================================
     if (leftMotorSpeed > 0 && rightMotorSpeed > 0) {
       pwmLeft = pwmLeft * offsetMundurKiri; 
       pwmRight = pwmRight * offsetMundurKanan;
     }
 
+    // =======================================================
+    // EKSEKUSI MOTOR (MURNI ANALOGWRITE - BEBAS GLITCH)
+    // =======================================================
+    
     // Eksekusi Roda Kiri
     if (leftMotorSpeed > 0) { 
       analogWrite(LEFT_IN1, pwmLeft); 
@@ -215,8 +245,8 @@ void loop() {
       analogWrite(RIGHT_IN4, pwmRight); 
     } 
     else { 
-      analogWrite(RIGHT_IN3, 0); 
-      analogWrite(RIGHT_IN4, 0); 
+      analogWrite(RIGHT_IN3, 255); 
+      analogWrite(RIGHT_IN4, 255); 
     }
   } 
 }
